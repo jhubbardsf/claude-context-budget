@@ -1,0 +1,20 @@
+{
+  "name": "claude-context-budget",
+  "owner": {
+    "name": "Josh Hubbard",
+    "email": "josh@joshuahubbard.dev"
+  },
+  "description": "Single-plugin marketplace for context-budget, so this repo installs on its own.",
+  "plugins": [
+    {
+      "name": "context-budget",
+      "source": "./plugins/context-budget",
+      "description": "Warns the model before Claude Code auto-compacts, keeps a handoff that's reloaded after every compaction, and lets the model compact itself at a clean checkpoint.",
+      "version": "0.1.0",
+      "author": { "name": "Josh Hubbard" },
+      "license": "MIT",
+      "category": "development-workflow",
+      "tags": ["compaction", "context", "hooks", "handoff"]
+    }
+  ]
+}
