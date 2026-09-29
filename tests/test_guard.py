@@ -19,9 +19,9 @@ def transcript(home, lines):
 def run(home, tpath, event, env=None, **extra):
     data = {"hook_event_name": event, "session_id": "sid1", "transcript_path": tpath, "cwd": home}
     data.update(extra)
-    e = {k: v for k, v in os.environ.items() if not k.startswith(("ITERM_SESSION_ID", "TMUX", "CLAUDE_CODE_AUTO", "DISABLE_", "CLAUDE_COMPACT", "CLAUDE_CONTEXT", "CLAUDE_AUTOCOMPACT", "CLAUDE_PROJECT_DIR", "CLAUDE_CONFIG_DIR"))}
+    e = {k: v for k, v in os.environ.items() if not k.startswith(("ITERM_SESSION_ID", "TMUX", "CLAUDE_CODE_AUTO", "DISABLE_", "CLAUDE_COMPACT", "CLAUDE_CONTEXT", "CLAUDE_AUTOCOMPACT", "CLAUDE_PROJECT_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_JOB_DIR"))}
     e["HOME"] = home; e.update(env or {})
-    r = subprocess.run(["python3", G], input=json.dumps(data), capture_output=True, text=True, env=e)
+    r = subprocess.run([sys.executable, G], input=json.dumps(data), capture_output=True, text=True, env=e)
     assert r.returncode == 0, r.stderr
     out = r.stdout.strip()
     return json.loads(out)["hookSpecificOutput"] if out else None
@@ -145,7 +145,15 @@ h19 = mkhome(); os.makedirs(h19 + "/.claude/postcompact/.state")
 json.dump({"ts": 1, "reason": "prompt box held a draft"}, open(h19 + "/.claude/postcompact/.state/sid1.compact-failed", "w"))
 t19 = transcript(h19, [rec(300000)])
 o = run(h19, t19, "UserPromptSubmit")
-check("F-note surfaced once", o and "didn't run (prompt box held a draft)" in o["additionalContext"] and run(h19, t19, "UserPromptSubmit") is None, o)
+check("F-note surfaced once", o and "queued request completed (prompt box held a draft)" in o["additionalContext"] and run(h19, t19, "UserPromptSubmit") is None, o)
+json.dump({"ts": 1, "reason": "timeout after sending /compact"}, open(h19 + "/.claude/postcompact/.state/sid1.compact-failed", "w"))
+o = run(h19, t19, "UserPromptSubmit", env={"DISABLE_AUTO_COMPACT": "1"})
+check("F-note timeout never claims nothing was typed or automatic compaction is enabled",
+      o and "may already have been sent" in o["additionalContext"]
+      and "Nothing was typed" not in o["additionalContext"]
+      and "didn't run" not in o["additionalContext"]
+      and "available if enabled" in o["additionalContext"]
+      and "still fires on its own" not in o["additionalContext"], o)
 # G-6: auto off + no pane never claims auto-compact fires and asks the user
 h20 = mkhome(); o = run(h20, transcript(h20, [rec(710000)]), "PostToolBatch", env={"DISABLE_AUTO_COMPACT": "1"})
 check("G6 auto-off, no pane wording", o and "fires by itself" not in o["additionalContext"] and "needs a /compact" in o["additionalContext"] and "don't ask the user" not in o["additionalContext"], o)
@@ -170,5 +178,59 @@ e.update({"HOME": h22, "ITERM_SESSION_ID": "w0t0p0:ABC"})
 d = {"hook_event_name": "PostToolBatch", "session_id": "sid1", "transcript_path": transcript(h22, [rec(710000)]), "cwd": h22}
 out = subprocess.run(["python3", g2], input=json.dumps(d), capture_output=True, text=True, env=e).stdout
 check("F2 no bogus ~-work path", root22 + "/josh-work/scripts/compact-now.py" in out and "~-work" not in out, out[:300])
+
+# Native background detection is a prerequisites check only. Stub executables
+# record accidental invocation, and the isolated PATH cannot find real tools.
+def bg_env(home, executables=("claude", "tmux")):
+    bindir = home + "/bin"
+    os.makedirs(bindir)
+    for name in executables:
+        tool = bindir + "/" + name
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\necho invoked >> " + home + "/tool-invoked\nexit 1\n")
+        os.chmod(tool, 0o755)
+    return {"PATH": bindir, "CLAUDE_JOB_DIR": home + "/jobs/native-bg"}
+
+for event, tokens in (("PostToolBatch", 710000), ("PostToolBatch", 745000), ("Stop", 710000)):
+    hbg = mkhome(); envbg = bg_env(hbg)
+    open(hbg + "/.claude/postcompact/sid1.md", "w").write("fresh handoff")
+    o = run(hbg, transcript(hbg, [rec(tokens)]), event, env=envbg)
+    check("BG supported at {} {}K advises attach and compact".format(event, tokens // 1000),
+          o and "compact-now.py" in o["additionalContext"]
+          and "temporarily attaches" in o["additionalContext"]
+          and "leaving the background session running" in o["additionalContext"]
+          and "can't compact itself" not in o["additionalContext"]
+          and not os.path.exists(hbg + "/tool-invoked"), o)
+
+for executables in ((), ("claude",), ("tmux",)):
+    hbg = mkhome(); envbg = bg_env(hbg, executables)
+    # Stale interactive variables inherited by a bg job must not skip its prerequisites.
+    envbg.update({"ITERM_SESSION_ID": "stale", "TMUX_PANE": "%999"})
+    o = run(hbg, transcript(hbg, [rec(710000)]), "PostToolBatch", env=envbg)
+    check("BG missing prerequisite {} cannot use inherited pane".format(executables),
+          o and "requires both claude and tmux on PATH" in o["additionalContext"]
+          and "compact-now.py --continue" not in o["additionalContext"]
+          and "can't compact itself" in o["additionalContext"]
+          and not os.path.exists(hbg + "/tool-invoked"), o)
+
+hbg = mkhome(); envbg = bg_env(hbg); envbg["DISABLE_AUTO_COMPACT"] = "1"
+o = run(hbg, transcript(hbg, [rec(710000)]), "PostToolBatch", env=envbg)
+check("BG auto off requires self-compact instead of user intervention",
+      o and "required here, not optional" in o["additionalContext"]
+      and "compact-now.py --continue" in o["additionalContext"]
+      and "needs a /compact" not in o["additionalContext"], o)
+
+hbg = mkhome(); envbg = bg_env(hbg); del envbg["CLAUDE_JOB_DIR"]
+o = run(hbg, transcript(hbg, [rec(710000)]), "PostToolBatch", env=envbg)
+check("BG tools alone do not advertise a native background session",
+      o and "compact-now.py --continue" not in o["additionalContext"]
+      and "temporarily attaches" not in o["additionalContext"], o)
+
+hpane = mkhome(); envpane = bg_env(hpane, ()); del envpane["CLAUDE_JOB_DIR"]
+envpane["TMUX_PANE"] = "%12"
+o = run(hpane, transcript(hpane, [rec(710000)]), "PostToolBatch", env=envpane)
+check("BG prerequisites do not change existing interactive tmux advice",
+      o and "compact-now.py --continue" in o["additionalContext"]
+      and "temporarily attaches" not in o["additionalContext"], o)
 print("\nFAILED:" if fails else "\nALL PASS", fails)
 sys.exit(1 if fails else 0)

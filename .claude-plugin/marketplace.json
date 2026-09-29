@@ -10,7 +10,7 @@
       "name": "context-budget",
       "source": "./plugins/context-budget",
       "description": "Warns the model before Claude Code auto-compacts, keeps a handoff that's reloaded after every compaction, and lets the model compact itself at a clean checkpoint.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": { "name": "Josh Hubbard" },
       "license": "MIT",
       "category": "development-workflow",

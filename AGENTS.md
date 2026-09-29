@@ -7,7 +7,7 @@ Claude Code hooks that warn the model before auto-compact, keep a reloadable han
 - `plugins/context-budget/` is the plugin: `.claude-plugin/plugin.json`, `hooks/hooks.json` (paths via `${CLAUDE_PLUGIN_ROOT}`), and `scripts/`, which holds the only copy of the code.
 - `.claude-plugin/marketplace.json` makes the repo its own single-plugin marketplace.
 - `install.sh` plus `installer/settings_merge.py` is the non-plugin install into `~/.claude/hooks`.
-- `tests/run.sh` runs all five suites, offline (README has the Docker one-liner for Linux). Add a regression case for every bug fixed, and run the suites on Linux before calling a change done.
+- `tests/run.sh` runs all six suites, offline (README has the Docker one-liner for Linux). The background suite uses a private tmux server with a fake Claude CLI when tmux is available. Add a regression case for every bug fixed, and run the suites on Linux before calling a change done.
 
 ## Rules
 
@@ -29,3 +29,11 @@ Claude Code hooks that warn the model before auto-compact, keep a reloadable han
 - The input box's top border can carry a label (`── ultracode ─`, a session name). The bottom border never does, so the parser anchors on the bottom.
 - Real typed prompts carry `origin.kind: "human"`. Stop-hook feedback is `isMeta`, and the compact summary is `isCompactSummary`.
 - Running sessions hot-reload changed commands on existing hook events right away. A newly added event (PostToolBatch here) isn't loaded immediately: one session only started running it hours later, without a restart.
+
+## Native background compaction (2.1.284)
+
+- A native background registry has `kind: bg`, `jobId`, full `sessionId`, worker `pid` and `procStart`. Background workers can inherit stale terminal variables, so registry kind takes precedence when choosing the transport.
+- Native bg uses a private tmux server solely for a `claude attach <jobId>` client. The worker's daemon-owned PTY differs from the client's tmux PTY; each identity is checked independently. No second `--resume` process is started.
+- The bg waiter owns attach through continuation and cleanup. `after_compact` leaves its marker in place so a separate hook process cannot race its terminal cleanup. The handoff hook still injects and deletes the handoff normally.
+- Success detaches with Ctrl+Z; failure disconnects only the private attach client without sending keys into an unfinished compaction. Cleanup never stops the background worker or supervisor.
+- Offline tests cover the transport with a fake CLI. A real forked/background Claude session is the required manual check for fullscreen prompt recognition and actual compaction.

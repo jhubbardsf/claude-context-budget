@@ -35,6 +35,7 @@ with a stripped PATH can land on /usr/bin/python3.
 """
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -187,7 +188,14 @@ def compact_trigger(limit, cwd, check_global=False):
 
 
 def pane_available():
-    """compact-now.py can only type into a pane it can find. Daemon/bg sessions strip these."""
+    """Whether compact-now.py has a candidate transport, without starting a process.
+
+    Native background jobs need a temporary `claude attach` in an isolated tmux PTY.
+    The helper validates the job/session identity before attaching; this hook only
+    checks prerequisites. Background jobs can inherit stale terminal variables.
+    """
+    if os.environ.get("CLAUDE_JOB_DIR"):
+        return bool(shutil.which("claude") and shutil.which("tmux"))
     return bool(os.environ.get("ITERM_SESSION_ID") or os.environ.get("TMUX_PANE"))
 
 
@@ -210,6 +218,14 @@ def build_message(kind, used, limit, trigger, auto_on, handoff, handoff_state):
                      "(roughly {} from here) requests start failing with 'Prompt is too long' and the turn "
                      "stops mid-step.".format(fmt(trigger), fmt(left)))
     pane = pane_available()
+    if os.environ.get("CLAUDE_JOB_DIR"):
+        if pane:
+            parts.append("For this native background session, the helper temporarily attaches through an "
+                         "isolated tmux terminal, waits for an idle empty prompt, compacts, and detaches "
+                         "while leaving the background session running.")
+        else:
+            parts.append("Native background self-compaction requires both claude and tmux on PATH for "
+                         "the helper's temporary attach; those prerequisites are unavailable here.")
     how = ("make `{} --continue` your last tool call and end the turn. Compaction runs as soon as the turn "
            "ends, then the work picks back up from the handoff. Leave off --continue if the task is finished "
            "and you're waiting on the user.").format(COMPACT_NOW)
@@ -225,7 +241,8 @@ def build_message(kind, used, limit, trigger, auto_on, handoff, handoff_state):
                           "Compacting before that line is required here, not optional: once the handoff is "
                           "written, ") + how)
         elif auto_on:
-            parts.append("This session has no terminal pane to type into, so it can't compact itself; a current "
+            parts.append("This session has no terminal pane or supported background attach transport, so it "
+                         "can't compact itself; a current "
                          "handoff is what protects the work when auto-compact fires.")
         else:
             parts.append("This session can't compact itself either, so stop at a clean checkpoint before the "
@@ -281,9 +298,10 @@ def pop_failure_note(sid):
     except OSError:
         pass
     reason = note.get("reason") if isinstance(note, dict) else None
-    return ("[context-budget hook] The /compact that compact-now.py queued didn't run ({}). Nothing was "
-            "typed into the session. Keep the handoff current; auto-compact still fires on its own, or run "
-            "compact-now again at the next clean checkpoint.".format(reason or "it gave up"))
+    return ("[context-budget hook] compact-now.py could not confirm its queued request completed ({}). "
+            "The command may already have been sent. Keep the handoff current, let any ongoing compaction "
+            "finish, and check the session before retrying at a clean checkpoint. Auto-compact remains "
+            "available if enabled.".format(reason or "it gave up"))
 
 
 def compact_queued(sid, now):

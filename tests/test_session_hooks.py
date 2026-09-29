@@ -60,6 +60,13 @@ h = mkhome()
 rc, out = hook("compact-mechanism-note.sh", h, payload())
 check("note: prints the handoff path and the absolute compact-now path when outside HOME",
       rc == 0 and h + "/.claude/postcompact/S1.md" in out and os.path.abspath(SCRIPTS) + "/compact-now.py" in out, out)
+check("note: native background guidance explains prerequisites, attach, and detach",
+      "Native background sessions (CLAUDE_JOB_DIR) need claude and tmux on PATH" in out
+      and "temporarily attaches through an isolated tmux terminal" in out
+      and "detaches while leaving the background session running" in out
+      and "exits 3 in sessions with no pane" not in out, out)
+check("note: failed attempts may already have sent compact",
+      "/compact may already have been sent" in out and "check the session before retrying" in out, out)
 inside = h + "/plugin/scripts"; shutil.copytree(SCRIPTS, inside)
 rc, out = hook("compact-mechanism-note.sh", h, payload(), inside)
 check("note: abbreviates to ~ when the scripts live under HOME", "`python3 ~/plugin/scripts/compact-now.py" in out, out)

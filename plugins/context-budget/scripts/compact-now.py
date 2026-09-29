@@ -6,7 +6,8 @@ Claude Code (2.1.283) has no model-callable compaction. The Skill tool refuses /
 automated way of putting text into a session (SendMessage, the inbox socket, cron, MCP
 channels) delivers slash commands as plain text. The only path that runs /compact is the
 human input path, so this types it into the session's own terminal pane, the same keys a
-person would press.
+person would press. Native background workers use a temporary `claude attach <jobId>`
+client in a private, detached tmux terminal, then detach without stopping the worker.
 
 It never types while the turn is running. Measured 2026-09-26: "/compact" typed while this
 script's own Bash call was still running reached Claude Code as a plain prompt and was
@@ -24,15 +25,15 @@ Model usage, as the LAST tool call of a turn, after writing the handoff:
   --dry-run   check everything and report, queue nothing.
   --manual    for a person running it by hand: skip the handoff and main-thread checks.
 
-Exit codes: 0 queued, 2 no fresh handoff, 3 no pane or session registry (daemon, bg,
-Desktop, Remote Control and -p sessions), 4 the pane couldn't be reached, 5 not called from
+Exit codes: 0 queued, 2 no fresh handoff, 3 no supported transport or matching registry
+(native bg requires claude and tmux on PATH), 4 the pane couldn't be reached, 5 not called from
 the main thread (a subagent's Bash would otherwise compact its PARENT session), 6 the Bash call is
 sandboxed and can't see or outlive the Claude process (Linux sandbox; rerun it unsandboxed).
 
 The user cancels a queued request by pressing Esc or typing anything: the waiter checks
 the transcript for their input and stands down. It also never types:
-  - into a pane whose tty isn't this Claude process's tty, or a session whose registry
-    sessionId/procStart don't match the one that queued it;
+  - into a pane whose tty isn't this Claude process's tty (or its private attach client's
+    tty), or a session whose registry sessionId/procStart/jobId don't match the requester;
   - unless the input box is recognized AND empty (the top border can carry a label such as
     "── ultracode ─", so it anchors on the unlabelled bottom border). Unrecognized counts as
     "don't type";
@@ -50,6 +51,9 @@ import datetime
 import glob
 import json
 import os
+import re
+import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -170,11 +174,129 @@ def pane_target(pid):
     return None
 
 
+def background_target(pid, sid, reg):
+    """Only the native background worker's own registry can select an attach target.
+
+    Background workers can inherit stale terminal environment variables. Their jobId,
+    full sessionId and worker PID take precedence over any such pane hints.
+    """
+    if not reg or reg.get("kind") != "bg" or reg.get("sessionId") != sid or \
+            str(reg.get("pid")) != str(pid):
+        return None
+    job = reg.get("jobId")
+    if not isinstance(job, str) or not job or not job.isalnum():
+        return None
+    if not shutil.which("tmux") or not shutil.which("claude"):
+        return None
+    return ["bg", {"job_id": job}, None]
+
+
+def attach_env():
+    """Keep auth/config routing, but don't identify the attach client as a nested REPL."""
+    env = dict(os.environ)
+    for key in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_JOB_DIR",
+                "TMUX", "TMUX_PANE", "ITERM_SESSION_ID"):
+        env.pop(key, None)
+    return env
+
+
+def bg_tmux(target, *args):
+    meta = target[1]
+    return run(["tmux", "-L", meta["socket"], "-f", os.devnull] + list(args),
+               timeout=10, env=attach_env())
+
+
+def open_background_pane(info):
+    """Attach to the existing worker through a private, detached tmux terminal.
+
+    This never resumes a second REPL or changes worktrees. tmux supplies the PTY and
+    terminal rendering so prompt inspection uses the same parser as ordinary panes.
+    """
+    target = info["target"]
+    meta = target[1]
+    if session_state(info) is None:
+        return False, "background worker identity changed"
+    res = run(["claude", "agents", "--json"], timeout=15, env=attach_env())
+    try:
+        rows = json.loads(res.stdout) if res and res.returncode == 0 else []
+    except ValueError:
+        rows = []
+    if not isinstance(rows, list) or not any(
+            isinstance(row, dict) and row.get("kind") == "background" and
+            row.get("id") == meta["job_id"] and row.get("sessionId") == info["sid"] and
+            str(row.get("pid")) == str(info["pid"]) for row in rows):
+        return False, "claude agents did not confirm this background worker"
+    meta["socket"] = "compact-now-{}-{}".format(os.getpid(), secrets.token_hex(6))
+    res = bg_tmux(target, "new-session", "-d", "-s", "attach", "-x", "160", "-y", "50",
+                  "-P", "-F", "#{pane_id}|#{pane_tty}|#{pane_pid}",
+                  shutil.which("claude"), "attach", meta["job_id"])
+    fields = res.stdout.strip().split("|") if res and res.returncode == 0 else []
+    if len(fields) != 3 or not fields[0].startswith("%") or not fields[1].startswith("/dev/") \
+            or not fields[2].isdigit():
+        return False, "could not start the temporary claude attach terminal"
+    meta.update(pane=fields[0], pane_pid=fields[2])
+    target[2] = fields[1]
+    log("attached background {} through private tmux {}".format(meta["job_id"], meta["socket"]))
+    return True, "temporary attach to background " + meta["job_id"]
+
+
+def background_pane(target, mode, text=""):
+    meta = target[1]
+    if not meta.get("socket"):
+        if mode == "probe":
+            return True, "background session {} (temporary tmux attach)".format(meta["job_id"])
+        return False, "background terminal not attached"
+    if not meta.get("pane"):
+        return False, "background terminal not initialized"
+    res = bg_tmux(target, "display-message", "-p", "-t", meta["pane"],
+                  "#{pane_tty}|#{pane_pid}|#{pane_in_mode}|#{pane_dead}")
+    fields = res.stdout.strip().split("|") if res and res.returncode == 0 else []
+    if len(fields) != 4 or fields[:2] != [target[2], meta["pane_pid"]] or fields[3] != "0":
+        return False, "temporary attach terminal exited or changed identity"
+    if mode == "probe":
+        return True, "background attach terminal " + meta["job_id"]
+    if fields[2] != "0":
+        return (True, "") if mode == "read" else (False, "temporary attach terminal is in copy mode")
+    if mode == "read":
+        res = bg_tmux(target, "capture-pane", "-p", "-t", meta["pane"])
+        return (True, res.stdout) if res and res.returncode == 0 else (False, "attach screen unavailable")
+    res = bg_tmux(target, "send-keys", "-t", meta["pane"], "-l", text)
+    if not res or res.returncode != 0:
+        return False, "attach text write failed"
+    time.sleep(0.6)
+    res = bg_tmux(target, "send-keys", "-t", meta["pane"], "Enter")
+    return bool(res and res.returncode == 0), "typed through background attach"
+
+
+def close_background_pane(target, detach=False):
+    """Release only our attach client. Never stop the background worker or its daemon.
+
+    Successful completion uses Claude's Ctrl+Z detach. On a failed/cancelled compact,
+    disconnect the client without sending keys that could interrupt compaction.
+    """
+    meta = target[1]
+    if not meta.get("socket"):
+        return
+    try:
+        ok, _ = background_pane(target, "probe")
+        if detach and ok:
+            bg_tmux(target, "send-keys", "-t", meta["pane"], "C-z")
+            time.sleep(1)
+        # This socket belongs exclusively to this request; its sole child is the
+        # attach client, not the daemon-owned Claude worker.
+        bg_tmux(target, "kill-server")
+        log("detached private background terminal " + meta["job_id"])
+    except Exception as e:
+        log("background terminal cleanup failed: {!r}".format(e))
+
+
 def pane(target, mode, text=""):
     """mode "probe", "read" or "type". Returns (ok, detail); "read" puts the screen in detail.
     Refuses when the pane's tty isn't the one recorded for this Claude process. A tmux pane in
     copy mode reads as an empty screen, which the caller treats as "can't verify"."""
     kind, ident, expect_tty = target
+    if kind == "bg":
+        return background_pane(target, mode, text)
     if kind == "iterm":
         res = run(["osascript", "-", ident, mode, expect_tty or "", text], input=ITERM_SCRIPT, timeout=20)
         if res is None:
@@ -218,8 +340,11 @@ def is_rule(line, labelled=False):
         return False
     if not labelled:
         return set(s) <= RULE_CHARS
+    # A labelled top border is a run of rule chars, the label, then a rule char. The label is
+    # a /rename title of any length, so no dash-ratio test: a 50-char title on a 160-col rule
+    # is ~63% dashes. The caller still requires the bottom border's width and a ❯ line below.
     dashes = sum(1 for c in s if c in RULE_CHARS)
-    return s[:10] == s[0] * 10 and s[0] in RULE_CHARS and s[-1] in RULE_CHARS and dashes >= 0.8 * len(s)
+    return s[:10] == s[0] * 10 and s[0] in RULE_CHARS and s[-1] in RULE_CHARS and dashes >= 20
 
 
 def prompt_box_empty(screen):
@@ -256,12 +381,35 @@ def registry(pid):
     return data if isinstance(data, dict) else None
 
 
+def background_worker_matches(info):
+    """Cross-check the live supervisor roster, not just a possibly stale PID file.
+
+    Attach can revive a dead job using a different REPL. The request must not follow
+    that replacement. Roster authentication fields are never returned or logged.
+    """
+    try:
+        os.kill(int(info["pid"]), 0)
+        with open(os.path.join(config_dir(), "daemon", "roster.json")) as f:
+            roster = json.load(f)
+        worker = roster["workers"][info["target"][1]["job_id"]]
+        return worker.get("sessionId") == info["sid"] and \
+            str(worker.get("replPid")) == str(info["pid"]) and \
+            bool(info.get("proc_start")) and worker.get("replProcStart") == info["proc_start"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def session_state(info):
     """(idle, statusUpdatedAt_ms) for the session that queued the request, or None when the pid's
     registry is gone or now belongs to a different session."""
     reg = registry(info.get("pid"))
     if not reg or reg.get("sessionId") != info.get("sid") or \
             (info.get("proc_start") and reg.get("procStart") != info.get("proc_start")):
+        return None
+    target = info.get("target") or []
+    if target and target[0] == "bg" and \
+            (reg.get("kind") != "bg" or reg.get("jobId") != target[1]["job_id"] or
+             not background_worker_matches(info)):
         return None
     return reg.get("status") == "idle", reg.get("statusUpdatedAt") or 0
 
@@ -291,8 +439,12 @@ def tail_records(transcript, nbytes=4 << 20):
             yield rec
 
 
-def user_acted_since(transcript, after):
-    """True if the user typed a prompt, queued one mid-turn, or interrupted since `after`."""
+def user_acted_since(transcript, after, ignore_compact=None):
+    """True for a human prompt, queued prompt or interruption since `after`.
+
+    During the background boundary wait, exclude exactly one own /compact command.
+    Other input, including a second /compact or an interruption, cancels continuation.
+    """
     for rec in tail_records(transcript):
         ts = iso_epoch(rec.get("timestamp"))
         if ts is None:
@@ -306,7 +458,23 @@ def user_acted_since(transcript, after):
             content = (rec.get("message") or {}).get("content")
             texts = [content] if isinstance(content, str) else \
                 [b.get("text") or "" for b in (content or []) if isinstance(b, dict) and b.get("type") == "text"]
-            if human or any(t.startswith("[Request interrupted by user") for t in texts):
+            if any(t.startswith("[Request interrupted by user") for t in texts):
+                return True
+            compact_command = len(texts) == 1 and (
+                (human and texts[0].strip() == "/compact") or
+                re.fullmatch(r"<command-name>/compact</command-name>"
+                             r"(?:\s*<command-message>compact</command-message>)?"
+                             r"(?:\s*<command-args>\s*</command-args>)?", texts[0].strip()))
+            if ignore_compact is not None and compact_command:
+                if ignore_compact:
+                    ignore_compact = False
+                    continue
+                return True
+            if ignore_compact is not None and any("<command-name>" in t for t in texts):
+                # Local slash commands can omit origin.kind entirely. Only the
+                # exact empty-argument command above belongs to this helper.
+                return True
+            if human:
                 return True
         elif rec.get("type") == "attachment":
             att = rec.get("attachment") or {}
@@ -364,8 +532,11 @@ def type_at_idle_prompt(info, text, after, deadline, wanted):
         # last checks, as close to the keystrokes as possible
         if not wanted():
             return "cancelled"
-        if session_state(info) != (True, updated) or claude_tty(info.get("pid")) != target[2]:
+        if session_state(info) != (True, updated):
             continue
+        if target[0] != "bg" and claude_tty(info.get("pid")) != target[2]:
+            continue
+        info["input_started_at"] = time.time()
         ok, detail = pane(target, "type", text)
         log("typed {!r}: {} ({})".format(text[:40], ok, detail))
         return "typed" if ok else "type failed: " + detail
@@ -454,14 +625,16 @@ def request(argv):
     except (PermissionError, ValueError):
         pass
     reg = registry(pid)
-    target = pane_target(pid)
-    if (os.environ.get("TMUX_PANE") or os.environ.get("ITERM_SESSION_ID")) and not claude_tty(pid):
+    is_bg = bool(reg and reg.get("kind") == "bg")
+    target = background_target(pid, sid, reg) if is_bg else pane_target(pid)
+    if not is_bg and (os.environ.get("TMUX_PANE") or os.environ.get("ITERM_SESSION_ID")) and not claude_tty(pid):
         say("couldn't read the Claude process's tty (on Linux, is /proc mounted or procps installed?). "
             "Nothing queued; auto-compact will still pick up the handoff when it fires.")
         return 3
     if not reg or reg.get("sessionId") != sid or not target:
-        say("no terminal pane or session registry to work with (daemon, bg, Desktop, Remote Control or "
-            "-p session). Nothing queued; auto-compact will still pick up the handoff when it fires.")
+        say("no supported terminal or matching session registry. Native background sessions need "
+            "claude and tmux on PATH and a matching worker jobId; other sessions need an iTerm or tmux pane. "
+            "Nothing queued; enabled auto-compact will still pick up the handoff when it fires.")
         return 3
     transcript = find_transcript(sid)
     if not manual:
@@ -526,6 +699,9 @@ def daemonize():
 
 def waiter(info):
     """Detached: type /compact at the next idle prompt, then watch for the compaction to land."""
+    if info["target"][0] == "bg":
+        background_waiter(info)
+        os._exit(0)
     sid, ts = info["sid"], info["ts"]
     try:
         still_queued = lambda: (read_marker(sid) or {}).get("ts") == ts  # noqa: E731
@@ -551,10 +727,106 @@ def waiter(info):
     os._exit(0)
 
 
+def background_waiter(info):
+    """One owner handles attach, compact, optional continuation, and detach.
+
+    SessionStart still reloads the handoff, but leaves this request's marker alone.
+    Keeping terminal ownership here avoids a cleanup/resume race between two helpers.
+    """
+    sid, ts = info["sid"], info["ts"]
+    target = info["target"]
+    reason, detach = None, False
+    queued = lambda: (read_marker(sid) or {}).get("ts") == ts  # noqa: E731
+    try:
+        deadline = ts + TURN_END_TIMEOUT
+        before = last_boundary(info.get("transcript"))
+        if before[0] >= ts:
+            reason = "session already compacted after this request"
+            return
+        # Attaching must wait for the current tool call and all Stop hooks to end.
+        while time.time() < deadline:
+            if not queued():
+                return
+            state = session_state(info)
+            if state is None:
+                reason = "background worker identity changed before attach"
+                return
+            if user_acted_since(info.get("transcript"), ts):
+                reason = "the user acted before attach"
+                return
+            if last_boundary(info.get("transcript")) != before:
+                reason = "session compacted before the requested attach"
+                return
+            if state[0] and state[1] / 1000.0 >= ts:
+                break
+            time.sleep(1)
+        else:
+            reason = "background session never went idle"
+            return
+        ok, detail = open_background_pane(info)
+        if not ok:
+            reason = detail
+            return
+        # Persist terminal metadata for diagnosis. The SessionStart hook sees bg and
+        # defers to this waiter; it never takes ownership of this terminal.
+        if not queued():
+            return
+        write_json(marker_path(sid), info)
+        wanted = lambda: queued() and last_boundary(info.get("transcript")) == before  # noqa: E731
+        outcome = type_at_idle_prompt(info, "/compact", ts, deadline, wanted)
+        if outcome != "typed":
+            reason = None if outcome == "cancelled" else outcome
+            return
+        typed_at = time.time()
+        info["typed_at"] = typed_at
+        if queued():
+            write_json(marker_path(sid), info)
+        deadline = typed_at + COMPACT_TIMEOUT
+        while time.time() < deadline:
+            if not queued():
+                return
+            if session_state(info) is None:
+                reason = "background worker identity changed during compaction"
+                return
+            if user_acted_since(info.get("transcript"), info.get("input_started_at", typed_at),
+                                ignore_compact=True):
+                reason = "the user acted after /compact; continuation cancelled"
+                return
+            when, trigger = last_boundary(info.get("transcript"))
+            if (when, trigger) != before and when >= typed_at - 5:
+                if trigger != "manual":
+                    reason = "boundary was not the requested manual compaction"
+                    return
+                log("background manual compaction confirmed for " + sid)
+                if info.get("continue"):
+                    outcome = type_at_idle_prompt(info, CONTINUE_PROMPT, when,
+                                                  time.time() + 300, queued)
+                    log("background resume prompt: " + outcome)
+                    if outcome != "typed":
+                        reason = "compacted, but resume prompt was not sent: " + outcome
+                        return
+                detach = True
+                return
+            time.sleep(1)
+        reason = "/compact was typed but no new manual compaction followed"
+    except Exception as e:
+        log("background waiter crashed: {!r}".format(e))
+        reason = "compact-now's background waiter crashed"
+    finally:
+        close_background_pane(target, detach=detach)
+        drop_marker(sid, ts, reason)
+
+
 def after_compact(sid, transcript):
-    """Run by post-compact-resume.sh on every compaction. Always consumes the marker. Types the
-    resume prompt only for a --continue request whose own typed /compact produced this boundary."""
+    """Handle interactive requests after compaction; native bg stays with its owning waiter.
+
+    For interactive requests, consumes the marker and sends continuation only when
+    the request's own typed /compact produced this boundary.
+    """
     info = read_marker(sid)
+    if info and (info.get("target") or [None])[0] == "bg":
+        # The original bg waiter watches the boundary and owns terminal cleanup.
+        return 0
     try:
         os.remove(marker_path(sid))
     except OSError:

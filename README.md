@@ -19,13 +19,15 @@ If you want it to fire at a real 80%, set `autoCompactWindow` to `833000`. The h
 
 ### compact-now
 
-Claude Code has no way for the model to compact itself. The Skill tool refuses `/compact`, and SendMessage, cron and inbox messages all deliver it as plain text. So the model runs `python3 <path>/compact-now.py --continue` as its last tool call and ends the turn. A detached waiter types `/compact` into the session's own iTerm2 or tmux pane once Claude Code's session registry says the session is idle. With `--continue` it then types a short "continue from the handoff" prompt after the compaction lands, so autonomous work keeps going. Without it, the session waits for you.
+Claude Code has no model-callable compaction command. The Skill tool refuses `/compact`, and SendMessage, cron and inbox messages all deliver it as plain text. The model runs `python3 <path>/compact-now.py --continue` as its last tool call and ends the turn. A detached waiter types `/compact` into the session's own iTerm2 or tmux pane once Claude Code's session registry says the session is idle. With `--continue` it then types a short "continue from the handoff" prompt after the compaction lands, so autonomous work keeps going. Without it, the session waits for user input.
+
+Native background sessions (`/bg`, `claude --bg`, or agent view) use a temporary `claude attach <jobId>` client in a private, detached tmux terminal. The helper checks the full session ID, worker PID, process start, and job ID, waits for an idle empty prompt, and checks a new manual `compact_boundary` before continuing. `Ctrl+Z` detaches the temporary client after completion; the background worker stays running. Failed attempts disconnect the client without sending cancellation keys. A single waiter owns this sequence, while the SessionStart hook continues to reload the handoff.
 
 It refuses or stands down rather than guess:
 
 - It won't run without a handoff written in the last 30 minutes (exit 2), and only the main thread can run it (exit 5). A subagent's call would compact the parent.
 - On Linux with Claude Code's Bash sandbox on, the call can't see the Claude process, so it exits 6 and says to rerun it unsandboxed.
-- Sessions with no pane exit 3. That covers `claude daemon`, `--bg`, Desktop and Remote Control sessions, since they strip `ITERM_SESSION_ID`/`TMUX_PANE`, so you only get the warnings there.
+- Native background workers require `claude` and `tmux` on PATH. Other sessions without a supported pane or a matching registry exit 3; warnings and handoffs still work. A Desktop, Remote Control, or `-p` session is not assumed to be a native background worker.
 - It never types mid-turn. Text typed during the tool call reached Claude Code as a plain prompt and got absorbed into the turn.
 - It never types into a pane whose tty or registry session isn't its own, over a draft in the input box, into an input box it can't recognize, or while tmux is in copy mode.
 - Press Esc or type anything and it cancels. If it gives up, the guard tells the model on its next turn.
@@ -65,7 +67,7 @@ It respects `CLAUDE_CONFIG_DIR` (so do the hooks, for Claude Code's own settings
 
 For the plain-hooks route on another box, `git clone https://github.com/jhubbardsf/claude-context-budget` there and run `./install.sh`.
 
-**Needs:** python3 3.9+ and bash, on macOS or Linux. There's no jq, and on Linux there's no procps either. compact-now also needs iTerm2 on macOS, or tmux. Without either, the warnings and handoffs still work.
+**Needs:** python3 3.9+ and bash, on macOS or Linux. There's no jq, and on Linux there's no procps either. Interactive compact-now needs iTerm2 on macOS, or tmux. Native background compact-now needs both tmux and a Claude CLI with `agents --json` and `attach` support (developed against 2.1.284). Without a supported transport, warnings and handoffs still work.
 
 **Running sessions:** a session that was already open picks up the Stop and UserPromptSubmit hooks right away. The mid-turn PostToolBatch hook is a newly added event, which Claude Code doesn't load into a running session straight away. In testing it arrived a few hours later with no restart, so restart the session if you want it now.
 
@@ -94,9 +96,10 @@ Optional line for your `CLAUDE.md`, so the model doesn't check in about it:
 tests/run.sh
 ```
 
-It runs offline and changes nothing on the box. There are five suites, about 135 cases, and they pass on macOS (Python 3.9 and 3.14) and in `python:3.9-slim` and `ubuntu:22.04` containers:
+The six suites run offline against throwaway state. When tmux is installed, the background transport test starts an isolated tmux server running a fake Claude CLI, verifies command delivery and detach, then removes the server. No real Claude session is opened:
 - the guard, against synthetic transcripts
 - compact-now's decision logic, with a mocked pane
+- native background identity, continuation ownership, and the temporary attach transport
 - the input-box parser, on sanitized copies of real layouts, including the labelled `── ultracode ─` border that broke the first version
 - the two SessionStart hooks
 - the installer, against throwaway config dirs
@@ -104,3 +107,5 @@ It runs offline and changes nothing on the box. There are five suites, about 135
 To run them on Linux: `docker run --rm -t -v "$PWD":/src:ro python:3.9-slim bash -c 'cp -r /src /w && cd /w && bash tests/run.sh'`
 
 The end-to-end check is manual. Start a cheap session in a detached tmux server (`tmux -L cctest new-session -d ...`) with a prompt that writes a handoff and runs `compact-now.py --continue`. Then confirm the transcript shows a manual `compact_boundary`, followed by the typed resume prompt and the model picking back up.
+
+For native background validation, fork a disposable session, background it, and ask it to write a fresh handoff and run `python3 ~/.claude/hooks/compact-now.py --continue` as its last tool call. The same worker must compact, continue, and remain available in agent view. Transport tests use a fake CLI; they do not establish end-to-end compatibility with Claude's live fullscreen prompt. Check `~/.claude/postcompact/.state/compact-now.log` for the attach, boundary, resume, and detach results.

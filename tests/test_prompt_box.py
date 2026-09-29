@@ -56,7 +56,9 @@ def expect(name, got, want):
         fails.append(name)
 
 
-for label in ("", "ultracode", "TB3 - Review - Task55"):
+# The last one is a real /rename title: 50 chars on a 180-col rule is only ~72% dashes, which the
+# first labelled-rule check (>=80% dashes) rejected, so a bg attach never typed (2026-09-29).
+for label in ("", "ultracode", "TB3 - Review - Task55", "TB3 - Review - Task58_v2 - Monday.9.28.26.10:06PM"):
     tag = label or "unlabelled"
     for sb_name, sb in (("clean", ()), ("scrollback", OLD_BOXES)):
         expect("{} / {} / empty".format(tag, sb_name), m.prompt_box_empty(frame(label, ["❯ "], sb)), True)
