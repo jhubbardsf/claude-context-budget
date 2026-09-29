@@ -37,3 +37,7 @@ Claude Code hooks that warn the model before auto-compact, keep a reloadable han
 - The bg waiter owns attach through continuation and cleanup. `after_compact` leaves its marker in place so a separate hook process cannot race its terminal cleanup. The handoff hook still injects and deletes the handoff normally.
 - Success detaches with Ctrl+Z; failure disconnects only the private attach client without sending keys into an unfinished compaction. Cleanup never stops the background worker or supervisor.
 - Offline tests cover the transport with a fake CLI. A real forked/background Claude session is the required manual check for fullscreen prompt recognition and actual compaction.
+
+## Planned
+
+- `docs/self-command-design.md` sketches generalizing the compact-now transport into an allowlisted self-command helper (`/rename`, `/color`, `/model`). Not implemented yet.
