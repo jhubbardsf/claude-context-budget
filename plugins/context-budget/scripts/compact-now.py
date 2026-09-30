@@ -48,6 +48,7 @@ Internal entry point: --after-compact <sid> <transcript>, run by post-compact-re
 State and a log live in ~/.claude/postcompact/.state/. Python 3.9 compatible.
 """
 import datetime
+import fcntl
 import glob
 import json
 import os
@@ -285,6 +286,12 @@ def close_background_pane(target, detach=False):
         # This socket belongs exclusively to this request; its sole child is the
         # attach client, not the daemon-owned Claude worker.
         bg_tmux(target, "kill-server")
+        # tmux leaves the socket file behind when its last client detaches; it's ours alone.
+        try:
+            os.remove(os.path.join(os.environ.get("TMUX_TMPDIR") or "/tmp",
+                                   "tmux-{}".format(os.getuid()), meta["socket"]))
+        except OSError:
+            pass
         log("detached private background terminal " + meta["job_id"])
     except Exception as e:
         log("background terminal cleanup failed: {!r}".format(e))
@@ -536,11 +543,30 @@ def type_at_idle_prompt(info, text, after, deadline, wanted):
             continue
         if target[0] != "bg" and claude_tty(info.get("pid")) != target[2]:
             continue
+        if self_command_active(info.get("sid")):
+            continue  # a self-command waiter is mid-delivery; it yields to us within a second
         info["input_started_at"] = time.time()
         ok, detail = pane(target, "type", text)
         log("typed {!r}: {} ({})".format(text[:40], ok, detail))
         return "typed" if ok else "type failed: " + detail
     return "never went idle"
+
+
+def self_command_active(sid):
+    """True while self-command.py holds this session's lock (it flocks <sid>.self-command.lock for
+    its waiter's lifetime). It stands down as soon as it sees our marker, so this only waits out
+    a delivery already in flight; the two never type into one box at once."""
+    try:
+        fd = os.open(os.path.join(STATE_DIR, "{}.self-command.lock".format(sid)), os.O_RDONLY)
+    except (OSError, TypeError):
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
 
 
 def marker_path(sid):
@@ -685,15 +711,20 @@ def request(argv):
 
 
 def daemonize():
-    """Double-fork into a new session with stdio on /dev/null. True in the detached child."""
+    """Double-fork into a new session with stdio on /dev/null. True in the detached child.
+    The intermediate child never returns: if setsid or the second fork fails there, it exits
+    rather than carry on as a second copy of the caller."""
     if os.fork():
         return False
-    os.setsid()
-    if os.fork():
-        os._exit(0)
-    devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(devnull, fd)
+    try:
+        os.setsid()
+        if os.fork():
+            os._exit(0)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+    except BaseException:
+        os._exit(1)
     return True
 
 

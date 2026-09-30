@@ -25,7 +25,7 @@ merge="$repo/installer/settings_merge.py"
 cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 dest="$cfg/hooks"
 settings="$cfg/settings.json"
-scripts=(context-budget-guard.py compact-now.py post-compact-resume.sh compact-mechanism-note.sh)
+scripts=(context-budget-guard.py compact-now.py self-command.py post-compact-resume.sh compact-mechanism-note.sh)
 
 mode=install dry="" force=""
 for arg in "$@"; do
@@ -131,6 +131,9 @@ case "$mode" in
     say "Done. New sessions get everything. Sessions already running pick up the Stop and"
     say "UserPromptSubmit hooks right away; the mid-turn PostToolBatch warning can take a while"
     say "to reach them, so restart a session if you want it there now."
+    say "Optional: python3 $(q "$dest/self-command.py") install-watch re-runs /remote-control in"
+    say "sessions that lose Remote Control when the signed-in account changes (macOS LaunchAgent)."
+    say "A running watcher restarts itself when these scripts change."
     chezmoi_hint
     ;;
   uninstall)
@@ -143,6 +146,14 @@ case "$mode" in
         say "  - $s (moved to $(basename "$to"))"
       fi
     done
+    # self-command's Remote Control watcher points at the script just moved away; without this its
+    # LaunchAgent would retry a missing file at every login.
+    rc_plist="$HOME/Library/LaunchAgents/dev.joshuahubbard.cc-self-command-rc.plist"
+    if [ -f "$rc_plist" ] && grep -qF "$dest/self-command.py" "$rc_plist"; then
+      run launchctl bootout "gui/$(id -u)/dev.joshuahubbard.cc-self-command-rc" 2>/dev/null || true
+      run rm -f "$rc_plist"
+      say "  - Remote Control watcher (LaunchAgent) removed"
+    fi
     say "Handoffs and state in ~/.claude/postcompact are left alone."
     chezmoi_hint
     ;;

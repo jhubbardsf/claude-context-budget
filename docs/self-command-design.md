@@ -1,6 +1,6 @@
 # Design sketch: `self-command`, a general slash-command transport
 
-Status: sketch, not implemented. Written 2026-09-29 after background self-compaction shipped in 0.1.1.
+Status: v1 implemented 2026-09-30 as `scripts/self-command.py` with `/remote-control`, `/rename` and `/color`, plus an `rc-watch` LaunchAgent that reconnects Remote Control after an account switch. It reuses compact-now's transport by importing it rather than moving it into a shared module (migration step 1 is still open). `/model` and `/mcp` aren't built. Written 2026-09-29 after background self-compaction shipped in 0.1.1.
 
 ## Problem
 

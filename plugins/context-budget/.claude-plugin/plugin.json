@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "context-budget",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Warns the model before Claude Code auto-compacts (mid-turn, at 70% and again just before the trigger), keeps a handoff file that's reloaded after every compaction, and lets the model compact itself at a clean checkpoint.",
   "author": {
     "name": "Josh Hubbard",

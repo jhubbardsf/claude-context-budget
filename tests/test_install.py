@@ -11,7 +11,7 @@ import tempfile
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 INSTALL = os.path.join(REPO, "install.sh")
-SCRIPTS = ["context-budget-guard.py", "compact-now.py", "post-compact-resume.sh", "compact-mechanism-note.sh"]
+SCRIPTS = ["context-budget-guard.py", "compact-now.py", "self-command.py", "post-compact-resume.sh", "compact-mechanism-note.sh"]
 fails = []
 
 
@@ -66,7 +66,7 @@ check("SessionStart group uses the compact matcher",
       settings(cfg)["hooks"]["SessionStart"][0].get("matcher") == "compact")
 # 2. idempotent re-run
 rc, out = run(env)
-check("re-run is a no-op", rc == 0 and "already up to date" in out and out.count("(unchanged)") == 4, out)
+check("re-run is a no-op", rc == 0 and "already up to date" in out and out.count("(unchanged)") == len(SCRIPTS), out)
 check("re-run leaves no settings backup", not glob.glob(cfg + "/settings.json.bak-*"))
 check("re-run doesn't duplicate registrations", count(cfg, "context-budget-guard.py") == 3)
 # 3. existing settings are preserved, and a hand-registered bare path counts as installed
@@ -108,7 +108,7 @@ check("uninstall removes every registration of ours",
 check("uninstall keeps other hooks and prunes emptied events",
       count(cfg, "/other/stop.sh") == 1 and "PostToolBatch" not in s["hooks"] and "SessionStart" not in s["hooks"], s)
 check("uninstall moves the scripts aside", not any(os.path.exists(cfg + "/hooks/" + n) for n in SCRIPTS)
-      and len(glob.glob(cfg + "/hooks/*.removed-*")) == 4)
+      and len(glob.glob(cfg + "/hooks/*.removed-*")) == len(SCRIPTS))
 # 7. refuses to double-install next to the plugin
 home, cfg, env = sandbox(plugin_listed=True)
 rc, out = run(env)

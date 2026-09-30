@@ -38,6 +38,9 @@ Claude Code hooks that warn the model before auto-compact, keep a reloadable han
 - Success detaches with Ctrl+Z; failure disconnects only the private attach client without sending keys into an unfinished compaction. Cleanup never stops the background worker or supervisor.
 - Offline tests cover the transport with a fake CLI. A real forked/background Claude session is the required manual check for fullscreen prompt recognition and actual compaction.
 
-## Planned
+## self-command (2026-09-30)
 
-- `docs/self-command-design.md` sketches generalizing the compact-now transport into an allowlisted self-command helper (`/rename`, `/color`, `/model`). Not implemented yet.
+- `self-command.py` imports `compact-now.py` as a module (importlib, it has a hyphen) and reuses its transport, so changing a compact-now function signature breaks self-command too. `tests/test_self_command.py` loads it the same way.
+- Remote Control facts (2.1.286): a disconnect is a `system`/`informational` record starting `Remote Control disconnected — ...`; the account-switch one says `signed-in claude.ai account or organization changed`. A reconnect is `system`/`bridge_status` `/remote-control is active · ...`. The registry carries `bridgeSessionId` only while connected. `/remote-control` on a connected session opens a Disconnect / Show QR / Continue picker, so it must be gated on the link being down.
+- A brand-new session's box shows a dim `❯ Try "..."` placeholder that plain captures read as a draft; `box_empty` treats that exact shape as empty. A brand-new session may also have no transcript file yet, so verifiers look it up again each time.
+- `docs/self-command-design.md` is the original sketch; `/model` and `/mcp` aren't built.
