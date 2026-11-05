@@ -245,10 +245,81 @@ class Sweep(unittest.TestCase):
 
     def test_rate_limit(self):
         os.makedirs(self.state, exist_ok=True)
-        for _ in range(3):
+        for _ in range(m.COMMANDS["rename"][3][0]):
             m.record("s1", "rename", "verified", typed=True)
         self.assertTrue(m.over_limit("s1", "rename"))
         self.assertFalse(m.over_limit("s1", "color"))
+
+
+class Immediate(unittest.TestCase):
+    """/rename runs mid-turn in Claude Code, so it waits only for an empty box. The rest wait for idle."""
+    INFO = {"sid": "s1", "target": ("bg", "x"), "pid": 1, "transcript": ""}
+
+    def deliver(self, immediate, idle=False, empty=True, pending=False):
+        typed = []
+
+        def pane(_target, action, text=None):
+            if action == "read":
+                return True, "screen"
+            typed.append(text)
+            return True, "ok"
+
+        with patch.object(m, "compact_pending", return_value=pending), \
+                patch.object(m.cn, "session_state", return_value=(idle, 1000)), \
+                patch.object(m.cn, "pane", side_effect=pane), \
+                patch.object(m, "box_empty", return_value=empty), \
+                patch.object(m.time, "sleep"):
+            out = m.type_when_idle(dict(self.INFO), "/rename X", 0, time.time() + 0.2, lambda: True, immediate)
+        return out, typed
+
+    def test_only_rename_is_immediate(self):
+        self.assertEqual(m.IMMEDIATE, {"rename"})
+
+    def test_immediate_types_into_a_busy_session(self):
+        self.assertEqual(self.deliver(True), ("typed", ["/rename X"]))
+
+    def test_others_still_wait_for_idle(self):
+        out, typed = self.deliver(False)
+        self.assertEqual((out, typed), ("never went idle", []))
+        self.assertEqual(self.deliver(False, idle=True), ("typed", ["/rename X"]))
+
+    def test_immediate_never_types_over_a_draft(self):
+        self.assertEqual(self.deliver(True, empty=False)[1], [])
+
+    def test_immediate_still_yields_to_compact_now(self):
+        self.assertEqual(self.deliver(True, pending=True), ("deferred to compact-now", []))
+
+    def run_bg(self, name):
+        got = {}
+
+        def typer(_info, _text, _after, _deadline, _wanted, immediate=False):
+            got["immediate"] = immediate
+            return "typed"
+
+        entry = m.COMMANDS[name]
+        commands = {name: (entry[0], lambda *a: (True, "confirmed"), entry[2], entry[3])}
+        with patch.dict(m.COMMANDS, commands), \
+                patch.object(m, "IDLE_WAIT", 0.1), \
+                patch.object(m, "compact_pending", return_value=False), \
+                patch.object(m, "tx_size", return_value=0), \
+                patch.object(m, "type_when_idle", side_effect=typer), \
+                patch.object(m.cn, "session_state", return_value=(False, 1000)), \
+                patch.object(m.cn, "open_background_pane", return_value=(True, "ok")) as attach, \
+                patch.object(m.cn, "close_background_pane"), \
+                patch.object(m.time, "sleep"):
+            out = m.run_command(dict(self.INFO), name, "X", "/" + name + " X", 0)
+        return out, got, attach.call_count
+
+    def test_background_attach_does_not_wait_for_rename(self):
+        out, got, attaches = self.run_bg("rename")
+        self.assertEqual(out, ("verified: confirmed", True))
+        self.assertTrue(got["immediate"])
+        self.assertEqual(attaches, 1)
+
+    def test_background_attach_still_waits_for_color(self):
+        out, _got, attaches = self.run_bg("color")
+        self.assertEqual(out, ("background session never went idle", False))
+        self.assertEqual(attaches, 0)
 
 
 class PromptBox(unittest.TestCase):

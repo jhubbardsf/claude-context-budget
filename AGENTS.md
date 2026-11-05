@@ -25,6 +25,7 @@ Claude Code hooks that warn the model before auto-compact, keep a reloadable han
 - The model's running Bash `tool_use` is already in the main transcript while it executes. A subagent's calls go under `subagents/`, which is what the main-thread check relies on.
 - `~/.claude/sessions/<pid>.json` has `status` (`busy`/`idle`), `statusUpdatedAt` (ms), `sessionId` and `procStart`.
 - Typing `/compact` mid-turn gets it absorbed as a plain prompt. Typing it at an idle prompt runs it. A keystroke during "Compacting…" cancels it.
+- Typing `/rename` mid-turn runs it right away (measured on 2.1.318, 2026-11-05, through a background attach). `IMMEDIATE` in `self-command.py` holds the commands known to behave this way.
 - Enter has to be its own write: the input tokenizer only splits a CR out of a read chunk shorter than 64 chars.
 - The input box's top border can carry a label (`── ultracode ─`, a session name). The bottom border never does, so the parser anchors on the bottom.
 - Real typed prompts carry `origin.kind: "human"`. Stop-hook feedback is `isMeta`, and the compact summary is `isCompactSummary`.

@@ -261,9 +261,13 @@ COMMANDS = {
     # name: (argument validator or None for no argument, verifier, already-in-that-state check,
     #        (max typed runs, window seconds))
     "remote-control": (None, verify_rc, already_rc, (4, 3600)),
-    "rename": (valid_title, verify_rename, already_rename, (3, 3600)),
+    "rename": (valid_title, verify_rename, already_rename, (30, 3600)),
     "color": (lambda a: a in COLORS, verify_color, already_color, (6, 3600)),
 }
+
+# Claude Code runs these while a turn is in progress instead of queuing them as a prompt, so they
+# only wait for an empty input box, not for the session to go idle.
+IMMEDIATE = {"rename"}
 
 
 def parse_command(words):
@@ -529,10 +533,11 @@ def styled_screen(target):
 
 # ---- the waiter ----------------------------------------------------------------------------
 
-def type_when_idle(info, text, after, deadline, wanted):
+def type_when_idle(info, text, after, deadline, wanted, immediate=False):
     """cn.type_at_idle_prompt without the compact-specific rules: an already-idle session is fine
     when `after` is 0, later human input doesn't cancel (wanted() decides that), and a pending
-    compact-now request always wins."""
+    compact-now request always wins. `immediate` skips the idle wait for commands in IMMEDIATE; the
+    input box still has to be empty."""
     target = info["target"]
     fails, unsure_since = 0, None
     while time.time() < deadline:
@@ -544,13 +549,14 @@ def type_when_idle(info, text, after, deadline, wanted):
         if state is None:
             return "session gone"
         idle, updated = state
-        if not idle or (after and updated / 1000.0 < after):
-            unsure_since = None
-            time.sleep(1)
-            continue
-        time.sleep(1.0)
-        if cn.session_state(info) != (True, updated):
-            continue
+        if not immediate:
+            if not idle or (after and updated / 1000.0 < after):
+                unsure_since = None
+                time.sleep(1)
+                continue
+            time.sleep(1.0)
+            if cn.session_state(info) != (True, updated):
+                continue
         ok, screen = cn.pane(target, "read")
         if not ok:
             fails += 1
@@ -569,7 +575,7 @@ def type_when_idle(info, text, after, deadline, wanted):
             continue
         if not wanted() or compact_pending(info["sid"]):
             continue
-        if cn.session_state(info) != (True, updated):
+        if not immediate and cn.session_state(info) != (True, updated):
             continue
         if target[0] != "bg" and cn.claude_tty(info.get("pid")) != target[2]:
             continue
@@ -651,11 +657,13 @@ def run_command(info, name, arg, text, after, wanted=lambda: True):
         base = wanted
         wanted = lambda: base() and rc_needed(info)  # noqa: E731
     deadline = time.time() + IDLE_WAIT
+    immediate = name in IMMEDIATE
     detach = False
     try:
         if target[0] == "bg":
-            # Attach only once the worker's turn is over, same as compact-now.
-            while time.time() < deadline:
+            # Attach only once the worker's turn is over, same as compact-now, unless the command
+            # is one Claude Code runs mid-turn.
+            while not immediate and time.time() < deadline:
                 if compact_pending(info["sid"]):
                     return "deferred to compact-now", False
                 if not wanted():
@@ -667,12 +675,13 @@ def run_command(info, name, arg, text, after, wanted=lambda: True):
                     break
                 time.sleep(1)
             else:
-                return "background session never went idle", False
+                if not immediate:
+                    return "background session never went idle", False
             ok, detail = cn.open_background_pane(info)
             if not ok:
                 return detail, False
         offset = tx_size(info)
-        outcome = type_when_idle(info, text, after, deadline, wanted)
+        outcome = type_when_idle(info, text, after, deadline, wanted, immediate)
         if outcome != "typed":
             return outcome, False
         typed_at = time.time()
@@ -811,12 +820,17 @@ def cmd_self(words, dry):
         time.sleep(0.3)
         info["transcript"] = info["transcript"] or cn.find_transcript(sid)
     if dry:
-        print("dry run: would type {!r} into {} after this turn ends".format(text, info["target"][0]))
+        when = "within seconds" if name in IMMEDIATE else "after this turn ends"
+        print("dry run: would type {!r} into {} {}".format(text, info["target"][0], when))
         return 0
     code = launch(info, name, arg, text, time.time())
     if code == 0 and not COMMANDS[name][2](info, arg):
-        print("Queued: {} will be typed into this session once this turn ends, then verified. "
-              "End the turn now.".format(text))
+        if name in IMMEDIATE:
+            print("Queued: {} will be typed into this session within seconds, then verified. "
+                  "Keep working.".format(text))
+        else:
+            print("Queued: {} will be typed into this session once this turn ends, then verified. "
+                  "End the turn now.".format(text))
     return code
 
 

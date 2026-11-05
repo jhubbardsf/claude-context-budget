@@ -36,7 +36,7 @@ Each entry declares what may be typed, how success is proven, and how often it m
 | command | args | verified by | rate limit | notes |
 |---|---|---|---|---|
 | `/compact` | none | a new manual `compact_boundary` in the transcript | 1 per 10 min | existing behavior, including `--continue` |
-| `/rename <title>` | 1-80 printable chars, no newline | new `custom-title` event whose title matches | 3 per hour | drives iTerm tab names and FleetView |
+| `/rename <title>` | 1-80 printable chars, no newline | new `custom-title` event whose title matches | 30 per hour | drives iTerm tab names and FleetView; types mid-turn, see safety rule 2 |
 | `/color <name>` | one of CC's palette: red blue green yellow purple orange pink cyan, or `default` | new `agent-color` event with that color | 6 per hour | `cc-tab-colors` repaints the tab within ~3 s |
 | `/model <id>` | a model id from an explicit list | next assistant record's `model` field (to verify) | 4 per hour | step down for long polling, back up for writing |
 | `/mcp` reconnect | server name from an allowlist | MCP tool reachable again (to verify) | 2 per 10 min | see open questions, since `/mcp` is a menu |
@@ -91,7 +91,8 @@ subagent, 6 command not allowed.
 
 1. Main thread only. A subagent's Bash would drive the parent session (exit 5, same check as today).
 2. Type only into an idle session, into a recognized, empty input box. Never type into a draft, an
-   unrecognized box, or tmux copy mode.
+   unrecognized box, or tmux copy mode. `/rename` skips the idle half, because Claude Code runs it
+   mid-turn (added 2026-11-05, when status-carrying session names made a wait for turn end too slow).
 3. Stand down on any user input after the request. The user always wins the race.
 4. Verify every command from the transcript or the tool surface. A keystroke that isn't confirmed is
    logged as a failure and relayed through the guard, never reported as success. The first bg attempt
