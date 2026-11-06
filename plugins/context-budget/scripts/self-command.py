@@ -266,8 +266,14 @@ COMMANDS = {
 }
 
 # Claude Code runs these while a turn is in progress instead of queuing them as a prompt, so they
-# only wait for an empty input box, not for the session to go idle.
+# only wait for an empty input box, not for the session to go idle. Mid-turn is when someone is
+# likely to be typing into that box, so these go through type_checked, which tmux panes and
+# background attaches can do. iTerm can't, so an iTerm session still waits for the turn to end.
 IMMEDIATE = {"rename"}
+
+
+def is_immediate(name, target):
+    return name in IMMEDIATE and target[0] in ("bg", "tmux")
 
 
 def parse_command(words):
@@ -533,11 +539,65 @@ def styled_screen(target):
 
 # ---- the waiter ----------------------------------------------------------------------------
 
+def box_text(screen):
+    """The input box's text, or None when the box can't be found. Same anchoring as
+    cn.prompt_box_empty, with a wrapped box joined back up."""
+    lines = screen.split("\n")
+    bottom = next((i for i in range(len(lines) - 1, -1, -1) if cn.is_rule(lines[i])), None)
+    if bottom is None:
+        return None
+    width = len(lines[bottom].rstrip())
+    for top in range(bottom - 1, max(bottom - 60, -1), -1):
+        if cn.is_rule(lines[top], labelled=True) and abs(len(lines[top].rstrip()) - width) <= 2:
+            if top + 1 >= bottom or not lines[top + 1].lstrip().startswith("❯"):
+                return None
+            return " ".join(l.strip() for l in lines[top + 1:bottom]).replace("❯", "", 1).strip()
+    return None
+
+
+def send_keys(target, keys, literal=False):
+    kind, ident, _ = target
+    flags = ["-l"] if literal else []
+    if kind == "bg":
+        res = cn.bg_tmux(target, "send-keys", "-t", ident["pane"], *flags, *keys)
+    else:
+        res = cn.run(["tmux", "send-keys", "-t", ident, *flags, *keys], timeout=10)
+    return bool(res and res.returncode == 0)
+
+
+def take_back(target, text, found):
+    """Remove what this helper typed and leave the person's own text in the box. Text they typed
+    during the wait sits after ours, so it's removed with ours and put back."""
+    if found is not None and not found.endswith(text) and found.startswith(text):
+        send_keys(target, ["BSpace"] * len(found))
+        send_keys(target, [found[len(text):]], literal=True)
+    else:
+        send_keys(target, ["BSpace"] * len(text))
+
+
+def type_checked(target, text):
+    """Type text, read the box back, and press Enter only if the box holds exactly that text.
+    Someone typing at the same moment shares this box, and Enter would send their draft with our
+    command stuck to it (hit 2026-11-05: "Whc/rename Task143 ..." went in as a message). Returns
+    (outcome, detail), where outcome is "typed", "draft" or "failed"."""
+    if not send_keys(target, [text], literal=True):
+        return "failed", "text write failed"
+    time.sleep(0.6)  # Enter has to be its own write
+    ok, screen = cn.pane(target, "read")
+    found = box_text(screen) if ok else None
+    if found is not None and "".join(found.split()) == "".join(text.split()):
+        if send_keys(target, ["Enter"]):
+            return "typed", "box held exactly the command"
+        return "failed", "Enter write failed"
+    take_back(target, text, found)
+    return "draft", "box read {!r}, took the command back out".format((found or "")[:60])
+
+
 def type_when_idle(info, text, after, deadline, wanted, immediate=False):
     """cn.type_at_idle_prompt without the compact-specific rules: an already-idle session is fine
     when `after` is 0, later human input doesn't cancel (wanted() decides that), and a pending
     compact-now request always wins. `immediate` skips the idle wait for commands in IMMEDIATE; the
-    input box still has to be empty."""
+    input box still has to be empty, twice in a row, and type_checked proves it before Enter."""
     target = info["target"]
     fails, unsure_since = 0, None
     while time.time() < deadline:
@@ -573,6 +633,11 @@ def type_when_idle(info, text, after, deadline, wanted, immediate=False):
                 return "prompt box held a draft" if empty is False else "prompt box not recognized"
             time.sleep(2)
             continue
+        if immediate:
+            time.sleep(0.5)
+            ok, screen = cn.pane(target, "read")
+            if not ok or box_empty(screen, target) is not True:
+                continue
         if not wanted() or compact_pending(info["sid"]):
             continue
         if not immediate and cn.session_state(info) != (True, updated):
@@ -580,6 +645,18 @@ def type_when_idle(info, text, after, deadline, wanted, immediate=False):
         if target[0] != "bg" and cn.claude_tty(info.get("pid")) != target[2]:
             continue
         info["typed_status_at"] = updated
+        if immediate:
+            outcome, detail = type_checked(target, text)
+            log("typed {!r} into {}: {} ({})".format(text[:60], info["sid"][:8], outcome, detail))
+            if outcome == "typed":
+                return "typed"
+            if outcome == "failed":
+                return "type failed: " + detail
+            unsure_since = unsure_since or time.time()
+            if time.time() - unsure_since > cn.DRAFT_TIMEOUT:
+                return "prompt box held a draft"
+            time.sleep(2)
+            continue
         ok, detail = cn.pane(target, "type", text)
         log("typed {!r} into {}: {} ({})".format(text[:60], info["sid"][:8], ok, detail))
         return "typed" if ok else "type failed: " + detail
@@ -657,7 +734,7 @@ def run_command(info, name, arg, text, after, wanted=lambda: True):
         base = wanted
         wanted = lambda: base() and rc_needed(info)  # noqa: E731
     deadline = time.time() + IDLE_WAIT
-    immediate = name in IMMEDIATE
+    immediate = is_immediate(name, target)
     detach = False
     try:
         if target[0] == "bg":
@@ -820,12 +897,12 @@ def cmd_self(words, dry):
         time.sleep(0.3)
         info["transcript"] = info["transcript"] or cn.find_transcript(sid)
     if dry:
-        when = "within seconds" if name in IMMEDIATE else "after this turn ends"
+        when = "within seconds" if is_immediate(name, info["target"]) else "after this turn ends"
         print("dry run: would type {!r} into {} {}".format(text, info["target"][0], when))
         return 0
     code = launch(info, name, arg, text, time.time())
     if code == 0 and not COMMANDS[name][2](info, arg):
-        if name in IMMEDIATE:
+        if is_immediate(name, info["target"]):
             print("Queued: {} will be typed into this session within seconds, then verified. "
                   "Keep working.".format(text))
         else:

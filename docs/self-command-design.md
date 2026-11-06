@@ -91,8 +91,9 @@ subagent, 6 command not allowed.
 
 1. Main thread only. A subagent's Bash would drive the parent session (exit 5, same check as today).
 2. Type only into an idle session, into a recognized, empty input box. Never type into a draft, an
-   unrecognized box, or tmux copy mode. `/rename` skips the idle half, because Claude Code runs it
-   mid-turn (added 2026-11-05, when status-carrying session names made a wait for turn end too slow).
+   unrecognized box, or tmux copy mode. `/rename` skips the idle half on background and tmux panes,
+   because Claude Code runs it mid-turn (added 2026-11-05, when status-carrying session names made a wait
+   for turn end too slow). It reads the box back before Enter so a draft is never sent (`type_checked`).
 3. Stand down on any user input after the request. The user always wins the race.
 4. Verify every command from the transcript or the tool surface. A keystroke that isn't confirmed is
    logged as a failure and relayed through the guard, never reported as success. The first bg attempt
