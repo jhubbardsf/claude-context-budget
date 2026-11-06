@@ -37,7 +37,7 @@ It refuses or stands down rather than guess:
 `self-command.py` reuses compact-now's transport to type a short allowlist of other slash commands (`/remote-control`, `/rename`, `/color`) and proves each one landed from the transcript or the session registry. `/compact` stays with compact-now.
 
 ```bash
-python3 <path>/self-command.py rename "TB3 - Task58 - submitted"   # a session renames itself after its turn
+python3 <path>/self-command.py rename "TB3 - Task58 - submitted"   # a session renames itself, within seconds, even mid-turn
 python3 <path>/self-command.py color green
 python3 <path>/self-command.py --pid 12345 --wait rc              # drive another live session now
 python3 <path>/self-command.py rc-sweep --dry-run                 # which sessions lost Remote Control
@@ -51,6 +51,7 @@ Guardrails, beyond compact-now's:
 
 - A command runs only if it's on the allowlist and its argument validates. A separate deny list (`/clear`, `/exit`, `/login`, `/model` and others) can't be overridden, and an argument can't contain a newline.
 - `/remote-control` is refused while the session's link is still up (the registry has a `bridgeSessionId`), because on a connected session it opens a Disconnect / Show QR / Continue picker instead. If any command does leave a picker open (status `waiting`, an "Esc to" footer, and no permission prompt), it presses Esc once.
+- In a background or tmux session, `/rename` doesn't wait for the session to go idle, because Claude Code runs it while a turn is in progress instead of queuing it as a prompt. Mid-turn is when someone is likely to be typing into that shared box, so it reads the box as empty twice, types without Enter, reads the box back, and presses Enter only if the box holds exactly the command. Otherwise it removes only its own text, leaves the draft alone and waits for the box to clear. An iTerm session can't do that two-step, so there `/rename` waits for the turn to end, as `/color` and `/remote-control` do everywhere. A keystroke in the moment between the read-back and Enter can still get through, which is a window of milliseconds.
 - One command per session at a time, enforced with a kernel `flock` on `<sid>.self-command.lock` that compact-now also honours. A pending compact-now request always wins: self-command stands down and compact-now waits out any delivery already in flight, so the two never type into one box.
 - Each command must be confirmed by a record written after the keystrokes (a new `custom-title`, `agent-color` or `bridge_status`), so a command that was swallowed is never logged as done. A command that's already in effect is skipped.
 - The watcher types `/remote-control` at most twice per disconnect, with a 5-minute gap. It gives up after six transport failures (no pane, pane unreachable). Waiting on a busy session or a draft never counts as a failure, it just backs off and tries again. It also respects the 4-per-hour cap.
@@ -136,5 +137,7 @@ To run them on Linux: `docker run --rm -t -v "$PWD":/src:ro python:3.9-slim bash
 The end-to-end check is manual. Start a cheap session in a detached tmux server (`tmux -L cctest new-session -d ...`) with a prompt that writes a handoff and runs `compact-now.py --continue`. Then confirm the transcript shows a manual `compact_boundary`, followed by the typed resume prompt and the model picking back up.
 
 For native background validation, fork a disposable session, background it, and ask it to write a fresh handoff and run `python3 ~/.claude/hooks/compact-now.py --continue` as its last tool call. The same worker must compact, continue, and remain available in agent view. Transport tests use a fake CLI; they do not establish end-to-end compatibility with Claude's live fullscreen prompt. Check `~/.claude/postcompact/.state/compact-now.log` for the attach, boundary, resume, and detach results.
+
+A mid-turn `/rename` was checked by hand on 2026-11-05 and 2026-11-06 (Claude Code 2.1.318) from a background session, through its own attach, about 4 seconds from the call to the new title with the turn carrying on. The first version pressed Enter blind, and on 2026-11-06 it sent a person's half-typed draft with the command stuck to it, which is why the read-back exists. The tmux path was tested against a stand-in prompt, not a real session.
 
 self-command was checked by hand on 2026-09-30 (Claude Code 2.1.286) against throwaway sessions: `/color`, `/rename` and a `/remote-control` reconnect through a background attach, `/color` through an interactive tmux pane on a fresh session, and self mode (a session queued `/rename` from its own Bash call, held while a picker was open, then typed and verified it). Its log is `~/.claude/postcompact/.state/self-command.log`.
